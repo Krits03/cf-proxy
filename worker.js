@@ -158,7 +158,7 @@ function toggleAdv(){
 function go(){
   var u = document.getElementById('url').value.trim();
   if(!u) return;
-  if(!/^https?:\\/\\//i.test(u)) u = 'https://' + u;
+  // 不强制加协议，交给 Worker 自动检测 http/https
   var params = '?url=' + encodeURIComponent(u);
   var cookie = document.getElementById('cookie').value.trim();
   if(cookie) params += '&c=' + encodeURIComponent(cookie);
@@ -191,19 +191,30 @@ async function handleProxy(request) {
     });
   }
 
+  // 解析目标地址；未带协议时自动检测（先 https，失败回退 http）
   let target;
+  let candidates = null; // 需要自动检测的候选协议（无协议输入时）
   try {
     target = new URL(targetRaw);
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+      return new Response('仅支持 http/https 协议', { status: 400 });
+    }
+  } catch (e) {
+    // 没有协议（如用户输入 example.com），交给自动检测
+    candidates = ['https:', 'http:'];
+  }
+
+  // 计算 Cookie 隔离用的 host（与协议无关，GET/POST 通用）
+  let hostForJar;
+  try {
+    hostForJar = new URL(candidates ? 'https://' + targetRaw : targetRaw).host;
   } catch (e) {
     return new Response('无效的 URL: ' + targetRaw, { status: 400 });
-  }
-  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
-    return new Response('仅支持 http/https 协议', { status: 400 });
   }
 
   // 1) 读取本 Worker 已保存的 Cookie（按目标域名隔离）
   const jar = parseWorkerCookies(request.headers.get('Cookie'));
-  const key = hostKey(target.host);
+  const key = hostKey(hostForJar);
   const cookies = jar[key] || {};
 
   // 2) 合并用户自定义 Cookie（来自 Web UI 的 &c=）
@@ -255,12 +266,28 @@ async function handleProxy(request) {
     }
   }
 
-  // 4) 发起上游请求
-  let upstream;
-  try {
-    upstream = await fetch(target.toString(), init);
-  } catch (e) {
-    return new Response('代理请求失败: ' + e.message, {
+  // 4) 发起上游请求（无协议时按 https -> http 自动检测，GET/POST 通用）
+  const tryUrls = candidates
+    ? candidates
+        .map((s) => {
+          try { return new URL(s + '//' + targetRaw); } catch (e) { return null; }
+        })
+        .filter(Boolean)
+    : [target];
+
+  let upstream = null;
+  let lastErr = null;
+  for (const u of tryUrls) {
+    try {
+      upstream = await fetch(u.toString(), init);
+      target = u; // 记录最终实际使用的地址
+      break;
+    } catch (e) {
+      lastErr = e; // 网络层失败（TLS/连接拒绝等），尝试下一个协议
+    }
+  }
+  if (!upstream) {
+    return new Response('代理请求失败: ' + (lastErr ? lastErr.message : '无法连接'), {
       status: 502,
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     });
