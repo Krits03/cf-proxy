@@ -1,0 +1,12 @@
+name = "proxy-worker"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+# 如需绑定自定义域名，取消下面注释并填写
+# routes = [
+#   { pattern = "proxy.your-domain.com", custom_domain = true }
+# ]
+
+# 变量（可选）
+# [vars]
+# ENV = "production"
